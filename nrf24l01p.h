@@ -109,6 +109,7 @@ struct nrf24l0_pipe {
 	wait_queue_head_t	read_wait_queue;
 	wait_queue_head_t	write_wait_queue;
 	struct task_struct	*tx_task_struct;
+	bool			write_done;
 
 };
 
@@ -126,13 +127,16 @@ struct nrf24l0_data {
 	struct task_struct	*tx_task_struct;
 	wait_queue_head_t	tx_wait_queue;
 	wait_queue_head_t	tx_done_wait_queue;
+	struct mutex		tx_fifo_mutex;
 
 	struct gpio_desc	*ce;
 	struct nrf24l0_pipe *pipe0;
 	bool			rx_active;
+	bool			tx_done;
 };
 
 struct nrf24l0_tx_data {
+	struct nrf24l0_pipe	*pipe0;
 	u8			size;
 	u8			pload[NRF24L0P_PLOAD_MAX];
 };
@@ -144,7 +148,7 @@ int nrf24l01p_is_rx_fifo_empty(struct nrf24l0_data *nrf24l01p);
 int nrf24l01_get_rx_payload(struct nrf24l0_data *nrf24l01p, uint8_t *pload);
 int nrf24l01p_set_mode(struct nrf24l0_data *nrf24l01p, enum nrf24_mode mode);
 int nrf24l01p_write_tx_pload(struct nrf24l0_data *nrf24l01p, uint8_t *pload, uint8_t size);
-int nrf24_print_status(struct nrf24l0_data *nrf24l01p);
+int nrf24_print_registers(struct nrf24l0_data *nrf24l01p);
 int nrf24l01p_read_register(struct nrf24l0_data *nrf24l01p, uint8_t reg,
 			    uint8_t *data ,uint8_t count);
 int nrf24l01p_flush_fifo(struct nrf24l0_data *nrf24l01p);

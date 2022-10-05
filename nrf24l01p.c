@@ -16,15 +16,39 @@
 #include <linux/bitops.h>
 #include "nrf24l01p.h"
 
+int nrf24_get_status(struct nrf24l0_data *nrf24l01p, uint8_t *status)
+{
+	return nrf24l01p_read_register(nrf24l01p, NRF24L0P_STATUS, status, 1);
+}
+
+
+static int registers_show(struct device *dev,
+			  struct device_attribute *attr,
+			  char *buf)
+{
+	int ret;
+	uint8_t status;
+	struct nrf24l0_data *nrf24l01p  = to_nrf24_device(dev);
+
+	nrf24_print_registers(nrf24l01p);
+	ret = nrf24_get_status(nrf24l01p, &status);
+	if (ret < 0)
+		return ret;
+	return snprintf(buf, 16, "STATUS = 0x%02X\n", status);
+}
+
+static DEVICE_ATTR_RO(registers);
+
 struct attribute *nrf24_attrs[] = {
-	
+	&dev_attr_registers.attr,
+	NULL,
 };
 
 struct attribute *nrf24_pipe_attrs[] = {
 	
 };
 
-int nrf24_print_status(struct nrf24l0_data *nrf24l01p)
+int nrf24_print_registers(struct nrf24l0_data *nrf24l01p)
 {
 const u8 nrf_reg[] = {
 	NRF24L0P_CONFIG,
@@ -221,8 +245,8 @@ int nrf24l01_get_rx_payload(struct nrf24l0_data *nrf24l01p, uint8_t *pload)
 int nrf24l01p_write_tx_pload(struct nrf24l0_data *nrf24l01p, uint8_t *pload,
 			     uint8_t size)
 {
-	return nrf24l01p_write_register(nrf24l01p, NRF24L0P_W_TX_PAYLOAD,
-					pload, size);
+	return regmap_bulk_write(nrf24l01p->regmap, NRF24L0P_W_TX_PAYLOAD,
+				 pload, size);
 }
 
 int nrf24l01p_configure(struct nrf24l0_data *nrf24l01p)

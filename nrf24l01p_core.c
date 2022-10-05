@@ -104,8 +104,30 @@ static ssize_t nrf24l01p_read(struct file *filp,
 			  size_t size,
 			  loff_t *f_pos)
 {
+	struct nrf24l0_data *nrf24l01p;
+	struct nrf24l0_pipe *pipe0;
+	unsigned int copied, n;
+	int ret;
 
-	return 10;
+	pipe0 = filp->private_data;
+	nrf24l01p = to_nrf24_device(pipe0->dev->parent);
+
+	if (kfifo_is_empty(&pipe0->rx_fifo)) {
+		if (filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		wait_event_interruptible(pipe0->read_wait_queue,
+					 !kfifo_is_empty(&pipe0->rx_fifo));
+	}
+
+	ret = mutex_lock_interruptible(&pipe0->rx_fifo_mutex);
+	if (ret)
+		return ret;
+
+	n = kfifo_to_user(&pipe0->rx_fifo, buf, size, &copied);
+
+	mutex_unlock(&pipe0->rx_fifo_mutex);
+
+	return n ? n : copied;
 }
 
 static ssize_t nrf24l01p_write(struct file *filp,
@@ -122,15 +144,33 @@ static ssize_t nrf24l01p_write(struct file *filp,
 
 	dev_info(&nrf24l01p->dev,"%s\n",__func__);
 	txdata.size = min_t(size_t, size, NRF24L0P_PLOAD_MAX);
-	txdata.size--;
+	txdata.pipe0 = pipe0;
 
 	memset(txdata.pload, 0, NRF24L0P_PLOAD_MAX);
-	if (copy_from_user(txdata.pload, buf, txdata.size))
+	if (copy_from_user(txdata.pload, buf, txdata.size)) {
 		dev_err(&nrf24l01p->dev,"%s\n","Data copy error\n");
+		goto exit_lock;
+	}
 
-	if (kfifo_in(&nrf24l01p->tx_fifo, &txdata, sizeof(txdata)) != sizeof(txdata))
+	if (mutex_lock_interruptible(&nrf24l01p->tx_fifo_mutex))
+		goto exit_lock;
+
+	if (kfifo_in(&nrf24l01p->tx_fifo, &txdata, sizeof(txdata)) != sizeof(txdata)) {
 		dev_err(&nrf24l01p->dev,"%s\n","Fifo write error\n");
+		goto exit_kfifo;
+	}
+	mutex_unlock(&nrf24l01p->tx_fifo_mutex);
+	wake_up_interruptible(&nrf24l01p->tx_wait_queue);
 
+	pipe0->write_done = false;
+	wait_event_interruptible(pipe0->write_wait_queue, pipe0->write_done);
+
+	return size;
+exit_kfifo:
+	mutex_unlock(&nrf24l01p->tx_fifo_mutex);
+
+exit_lock:
+	//if (filp->f_flags & O_NONBLOCK)
 	wake_up_interruptible(&nrf24l01p->tx_wait_queue);
 	return size;
 }
@@ -177,6 +217,7 @@ static void nrf24_isr_work_handler(struct work_struct *work)
 
 	if (status & NRF24L0P_RX_DR) {
 		dev_info(&nrf24l01p->dev, "ISR: NRF24L0P_RX_DR\n");
+		nrf24l01p->rx_active = true;
 		mdelay(50);
 		nrf24l01p_clear_irq(nrf24l01p, NRF24L0P_RX_DR);
 		schedule_work(&nrf24l01p->rx_work);
@@ -184,6 +225,7 @@ static void nrf24_isr_work_handler(struct work_struct *work)
 
 	if (status & NRF24L0P_TX_DS) {
 		dev_info(&nrf24l01p->dev, "%s: TX_DS\n", __func__);
+		nrf24l01p->tx_done = true;
 		nrf24l01p_clear_irq(nrf24l01p, NRF24L0P_TX_DS);
 		wake_up_interruptible(&nrf24l01p->tx_done_wait_queue);
 	}
@@ -194,9 +236,11 @@ static void nrf24_rx_work_handler(struct work_struct *work)
 {
 	struct nrf24l0_data *nrf24l01p;
 	u8 payload[NRF24L0P_PLOAD_MAX];
-	int ret, length;
+	struct nrf24l0_pipe *pipe0;
+	int length;
 
 	nrf24l01p = container_of(work, struct nrf24l0_data, rx_work);
+	pipe0 = nrf24l01p->pipe0;
 
 	dev_info(&nrf24l01p->dev, "%s = 0\n",__func__);
 	while(!nrf24l01p_is_rx_fifo_empty(nrf24l01p))
@@ -206,8 +250,14 @@ static void nrf24_rx_work_handler(struct work_struct *work)
 		if (length < 0) {
 			dev_info(&nrf24l01p->dev, "payload invalid\n");
 		}
+		nrf24l01p->rx_active = false;
+		if (mutex_lock_interruptible(&pipe0->rx_fifo_mutex))
+			return;
+		kfifo_in(&pipe0->rx_fifo, payload, length);
+		mutex_unlock(&pipe0->rx_fifo_mutex);
+		dev_info(&nrf24l01p->dev, "%s = wakeup read\n",__func__);
+		wake_up_interruptible(&pipe0->read_wait_queue);
 	}
-
 }
 
 static irqreturn_t nrf24l01_isr(int irq, void *dev_id)
@@ -316,6 +366,7 @@ static int nrf24l01p_tx_thread(void *data)
 {
 	struct nrf24l0_data *nrf24l01p = data;
 	struct nrf24l0_tx_data txdata;
+	struct nrf24l0_pipe *pipe0;
 	int index, ret;
 
 	while(true) {
@@ -328,41 +379,72 @@ static int nrf24l01p_tx_thread(void *data)
 		if (kthread_should_stop())
 			return 0;
 		
+		if (mutex_lock_interruptible(&nrf24l01p->tx_fifo_mutex))
+			continue;
+
 		ret = kfifo_out(&nrf24l01p->tx_fifo, &txdata, sizeof(txdata));
 		if (ret != sizeof(txdata)) {
 			dev_err(&nrf24l01p->dev, "get tx_data from fifo failed\n");
 			continue;
 		}
+		mutex_unlock(&nrf24l01p->tx_fifo_mutex);
+		pipe0 = txdata.pipe0;
+	
 		dev_info(&nrf24l01p->dev, "Tx data: ");
 		for(index = 0; index < txdata.size; index++) {
 			dev_info(&nrf24l01p->dev, "0x%02x ", txdata.pload[index]);
 		}
 		dev_info(&nrf24l01p->dev, "\n");
 
-		txdata.pload[0] = '0';
-		txdata.pload[1] = '1';
-		txdata.pload[2] = '2';
-		txdata.pload[3] = '3';
-		txdata.size = 4;
 		nrf24_ce_pin(nrf24l01p, 0);
 
 		ret = nrf24l01p_set_mode(nrf24l01p, NRF24_MODE_TX);
 		if (ret) {
 			dev_err(&nrf24l01p->dev, "Mode set to Tx failed\n");
+			goto gotoRX;
 		}
 
 		//auto ack
-
 
 		ret = nrf24l01p_write_tx_pload(nrf24l01p, txdata.pload, txdata.size);
 		if (ret < 0) {
 			dev_err(&nrf24l01p->dev,
 				"write TX PLOAD failed (%d)\n",
 				ret);
+			goto gotoRX;
 		}
 
 		nrf24_ce_pin(nrf24l01p, 1);
 		dev_info(&nrf24l01p->dev, "Data sent\n");
+
+		//Wait for ack
+		nrf24l01p->tx_done = false;
+		dev_info(&nrf24l01p->dev, "Wait for ack\n");
+		wait_event_interruptible(nrf24l01p->tx_done_wait_queue,
+					 (nrf24l01p->tx_done ||
+					 kthread_should_stop()));
+
+		if (kthread_should_stop())
+			return 0;
+
+		dev_info(&nrf24l01p->dev, "ACK received\n");
+		pipe0->write_done = true;
+		wake_up_interruptible(&pipe0->write_wait_queue);
+
+gotoRX:
+		if (kfifo_is_empty(&nrf24l01p->tx_fifo) || nrf24l01p->rx_active) {
+			dev_info(&nrf24l01p->dev, "%s: NRF24_MODE_RX\n", __func__);
+
+			//enter Standby-I
+			nrf24_ce_pin(nrf24l01p, 0);
+			ret = nrf24l01p_set_mode(nrf24l01p, NRF24_MODE_RX);
+			if (ret < 0) {
+				dev_err(&nrf24l01p->dev,
+						"Set rx mode failed (%d)\n",
+						ret);
+			}
+			nrf24_ce_pin(nrf24l01p, 1);
+		}
 	}
 	return 0;
 }
@@ -449,7 +531,6 @@ static int nrf24l01p_probe(struct spi_device *spi)
 
 	dev_info(&nrf24l01p->dev, "Probe success\n");
 	spi_set_drvdata(spi, nrf24l01p);
-	nrf24_print_status(nrf24l01p);
 	return 0;
 
 remove_device:
