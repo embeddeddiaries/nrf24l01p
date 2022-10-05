@@ -142,7 +142,6 @@ static ssize_t nrf24l01p_write(struct file *filp,
 	pipe0 = filp->private_data;
 	nrf24l01p = to_nrf24_device(pipe0->dev->parent);
 
-	dev_info(&nrf24l01p->dev,"%s\n",__func__);
 	txdata.size = min_t(size_t, size, NRF24L0P_PLOAD_MAX);
 	txdata.pipe0 = pipe0;
 
@@ -207,7 +206,6 @@ static void nrf24_isr_work_handler(struct work_struct *work)
 	int ret;
 
 	nrf24l01p = container_of(work, struct nrf24l0_data, isr_work);
-	dev_info(&nrf24l01p->dev, "ISR worker thread\n");
 
 	ret = nrf24l01p_get_status(nrf24l01p, &status);
 	if (ret) {
@@ -216,7 +214,7 @@ static void nrf24_isr_work_handler(struct work_struct *work)
 	}
 
 	if (status & NRF24L0P_RX_DR) {
-		dev_info(&nrf24l01p->dev, "ISR: NRF24L0P_RX_DR\n");
+		dev_info(&nrf24l01p->dev, "%s: RX_DR\n", __func__);
 		nrf24l01p->rx_active = true;
 		mdelay(50);
 		nrf24l01p_clear_irq(nrf24l01p, NRF24L0P_RX_DR);
@@ -230,6 +228,13 @@ static void nrf24_isr_work_handler(struct work_struct *work)
 		wake_up_interruptible(&nrf24l01p->tx_done_wait_queue);
 	}
 
+	if (status & NRF24L0P_MAX_RT) {
+		dev_info_ratelimited(&nrf24l01p->dev, "%s: MAX_RT\n", __func__);
+		nrf24l01p->tx_done = true;
+		nrf24l01p_flush_fifo(nrf24l01p);
+		nrf24l01p_clear_irq(nrf24l01p, NRF24L0P_TX_DS);
+		wake_up_interruptible(&nrf24l01p->tx_done_wait_queue);
+	}
 }
 
 static void nrf24_rx_work_handler(struct work_struct *work)
@@ -242,7 +247,6 @@ static void nrf24_rx_work_handler(struct work_struct *work)
 	nrf24l01p = container_of(work, struct nrf24l0_data, rx_work);
 	pipe0 = nrf24l01p->pipe0;
 
-	dev_info(&nrf24l01p->dev, "%s = 0\n",__func__);
 	while(!nrf24l01p_is_rx_fifo_empty(nrf24l01p))
 	{
 		memset(payload, 0, NRF24L0P_PLOAD_MAX);
@@ -255,7 +259,6 @@ static void nrf24_rx_work_handler(struct work_struct *work)
 			return;
 		kfifo_in(&pipe0->rx_fifo, payload, length);
 		mutex_unlock(&pipe0->rx_fifo_mutex);
-		dev_info(&nrf24l01p->dev, "%s = wakeup read\n",__func__);
 		wake_up_interruptible(&pipe0->read_wait_queue);
 	}
 }
@@ -265,7 +268,6 @@ static irqreturn_t nrf24l01_isr(int irq, void *dev_id)
 	unsigned long flags;
 	struct nrf24l0_data *nrf24l01p = dev_id;
 
-	dev_info(&nrf24l01p->dev, "Interrupt occured\n");
 	spin_lock_irqsave(&nrf24l01p->lock, flags);
 
 	schedule_work(&nrf24l01p->isr_work);
@@ -367,15 +369,13 @@ static int nrf24l01p_tx_thread(void *data)
 	struct nrf24l0_data *nrf24l01p = data;
 	struct nrf24l0_tx_data txdata;
 	struct nrf24l0_pipe *pipe0;
-	int index, ret;
+	int ret;
 
 	while(true) {
-		dev_info(&nrf24l01p->dev, "Tx thread waiting for event\n");
 		wait_event_interruptible(nrf24l01p->tx_wait_queue,
 					 kthread_should_stop() ||
 					 (!nrf24l01p->rx_active && !kfifo_is_empty(&nrf24l01p->tx_fifo)));
 
-		dev_info(&nrf24l01p->dev, "Tx thread started\n");
 		if (kthread_should_stop())
 			return 0;
 		
@@ -390,12 +390,6 @@ static int nrf24l01p_tx_thread(void *data)
 		mutex_unlock(&nrf24l01p->tx_fifo_mutex);
 		pipe0 = txdata.pipe0;
 	
-		dev_info(&nrf24l01p->dev, "Tx data: ");
-		for(index = 0; index < txdata.size; index++) {
-			dev_info(&nrf24l01p->dev, "0x%02x ", txdata.pload[index]);
-		}
-		dev_info(&nrf24l01p->dev, "\n");
-
 		nrf24_ce_pin(nrf24l01p, 0);
 
 		ret = nrf24l01p_set_mode(nrf24l01p, NRF24_MODE_TX);
@@ -415,11 +409,9 @@ static int nrf24l01p_tx_thread(void *data)
 		}
 
 		nrf24_ce_pin(nrf24l01p, 1);
-		dev_info(&nrf24l01p->dev, "Data sent\n");
 
 		//Wait for ack
 		nrf24l01p->tx_done = false;
-		dev_info(&nrf24l01p->dev, "Wait for ack\n");
 		wait_event_interruptible(nrf24l01p->tx_done_wait_queue,
 					 (nrf24l01p->tx_done ||
 					 kthread_should_stop()));
@@ -427,13 +419,11 @@ static int nrf24l01p_tx_thread(void *data)
 		if (kthread_should_stop())
 			return 0;
 
-		dev_info(&nrf24l01p->dev, "ACK received\n");
 		pipe0->write_done = true;
 		wake_up_interruptible(&pipe0->write_wait_queue);
 
 gotoRX:
 		if (kfifo_is_empty(&nrf24l01p->tx_fifo) || nrf24l01p->rx_active) {
-			dev_info(&nrf24l01p->dev, "%s: NRF24_MODE_RX\n", __func__);
 
 			//enter Standby-I
 			nrf24_ce_pin(nrf24l01p, 0);
@@ -529,7 +519,6 @@ static int nrf24l01p_probe(struct spi_device *spi)
 		goto remove_device;
 	}
 
-	dev_info(&nrf24l01p->dev, "Probe success\n");
 	spi_set_drvdata(spi, nrf24l01p);
 	return 0;
 

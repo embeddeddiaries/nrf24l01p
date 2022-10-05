@@ -89,7 +89,6 @@ char *nrf_reg_name[] = {
 	uint8_t value;
 
 	for (loop = 0; loop < 14; loop++) {
-		//ret = spi_w8r8(spi, nrf_reg[loop]);
 		ret = nrf24l01p_read_register(nrf24l01p, nrf_reg[loop],
 					      &value, 1);
 		if (ret < 0)
@@ -110,8 +109,6 @@ int nrf24l01p_read_register(struct nrf24l0_data *nrf24l01p, uint8_t reg,
 			    uint8_t *data ,uint8_t count)
 {
 	reg &= 0x1F;
-	//if (count == 1)
-	//	return regmap_read(nrf24l01p->regmap, reg, (u32 *)data);
 
 	return regmap_bulk_read(nrf24l01p->regmap, reg, data, count);
 }
@@ -121,8 +118,6 @@ int nrf24l01p_write_register(struct nrf24l0_data *nrf24l01p, uint8_t reg,
 {
 
 	reg = 0x20 | reg;
-//	if (count == 1)
-		//return regmap_write(nrf24l01p->regmap, reg, *(u32*)data);
 
 	return regmap_bulk_write(nrf24l01p->regmap, reg, data, count);
 
@@ -205,7 +200,7 @@ int nrf24l01p_is_rx_fifo_empty(struct nrf24l0_data *nrf24l01p)
 
 int nrf24l01_get_rx_payload(struct nrf24l0_data *nrf24l01p, uint8_t *pload)
 {
-	u8 status, length, index;
+	u8 status, length;
 	int ret;
 
 	ret = nrf24l01p_get_status(nrf24l01p, &status);
@@ -225,18 +220,12 @@ int nrf24l01_get_rx_payload(struct nrf24l0_data *nrf24l01p, uint8_t *pload)
 	}
 
 	if (length > 0 && length <= NRF24L0P_PLOAD_MAX) {
-		dev_info(&nrf24l01p->dev, "%s: length = %zd\n", __func__, length);
 		ret = regmap_bulk_read(nrf24l01p->regmap, NRF24L0P_R_RX_PAYLOAD,
 				       pload, length);
 		if (ret < 0) {
 			dev_err(&nrf24l01p->dev, "Payload read failed");
 			return ret;
 		}
-		dev_info(&nrf24l01p->dev, "Rx data: ");
-		for (index = 0; index < length; index++) {
-			dev_info(&nrf24l01p->dev, "0x%02x ", pload[index]);
-		}
-		dev_info(&nrf24l01p->dev, "\n");
 	}
 
 	return length;
