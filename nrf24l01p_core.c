@@ -15,6 +15,7 @@
 #include <linux/kfifo.h>
 #include <linux/list.h>
 #include <linux/delay.h>
+#include <linux/poll.h>
 
 #include "nrf24l01p.h"
 
@@ -177,6 +178,18 @@ exit_lock:
 static __poll_t nrf24l01p_poll(struct file *filp, struct poll_table_struct *wait)
 {
 	__poll_t events = 0;
+	struct nrf24l0_data *nrf24l01p;
+	struct nrf24l0_pipe *pipe0;
+
+	pipe0 = filp->private_data;
+	nrf24l01p = to_nrf24_device(pipe0->dev->parent);
+
+	poll_wait(filp, &pipe0->read_wait_queue, wait);
+	if (!kfifo_is_empty(&pipe0->rx_fifo))
+		events |= (EPOLLIN | EPOLLRDNORM);
+
+	if (!kfifo_is_full(&nrf24l01p->tx_fifo))
+		events |= (EPOLLOUT | EPOLLWRNORM);
 
 	return events;
 }
