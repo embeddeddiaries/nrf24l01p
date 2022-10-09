@@ -385,6 +385,7 @@ static int nrf24l01p_tx_thread(void *data)
 	int ret;
 
 	while(true) {
+		//Wait for data from user space.
 		wait_event_interruptible(nrf24l01p->tx_wait_queue,
 					 kthread_should_stop() ||
 					 (!nrf24l01p->rx_active && !kfifo_is_empty(&nrf24l01p->tx_fifo)));
@@ -392,9 +393,11 @@ static int nrf24l01p_tx_thread(void *data)
 		if (kthread_should_stop())
 			return 0;
 		
+		//Mutex to protect Tx FIFO
 		if (mutex_lock_interruptible(&nrf24l01p->tx_fifo_mutex))
 			continue;
 
+		//Get data from TX FIFO
 		ret = kfifo_out(&nrf24l01p->tx_fifo, &txdata, sizeof(txdata));
 		if (ret != sizeof(txdata)) {
 			dev_err(&nrf24l01p->dev, "get tx_data from fifo failed\n");
@@ -403,16 +406,17 @@ static int nrf24l01p_tx_thread(void *data)
 		mutex_unlock(&nrf24l01p->tx_fifo_mutex);
 		pipe0 = txdata.pipe0;
 	
+		//Disable device
 		nrf24_ce_pin(nrf24l01p, 0);
 
+		//Set TX mode
 		ret = nrf24l01p_set_mode(nrf24l01p, NRF24_MODE_TX);
 		if (ret) {
 			dev_err(&nrf24l01p->dev, "Mode set to Tx failed\n");
 			goto gotoRX;
 		}
 
-		//auto ack
-
+		//Write data into FIFO
 		ret = nrf24l01p_write_tx_pload(nrf24l01p, txdata.pload, txdata.size);
 		if (ret < 0) {
 			dev_err(&nrf24l01p->dev,
@@ -421,6 +425,7 @@ static int nrf24l01p_tx_thread(void *data)
 			goto gotoRX;
 		}
 
+		//Enable device
 		nrf24_ce_pin(nrf24l01p, 1);
 
 		//Wait for ack
@@ -433,9 +438,11 @@ static int nrf24l01p_tx_thread(void *data)
 			return 0;
 
 		pipe0->write_done = true;
+		//Wake up write fops to wait for next Tx data
 		wake_up_interruptible(&pipe0->write_wait_queue);
 
 gotoRX:
+		//Again go back to Rx mode
 		if (kfifo_is_empty(&nrf24l01p->tx_fifo) || nrf24l01p->rx_active) {
 
 			//enter Standby-I
@@ -454,7 +461,6 @@ gotoRX:
 
 static int nrf24l01p_probe(struct spi_device *spi)
 {
-	//const struct spi_device_id *id = spi_get_device_id(spi);
 	uint8_t known_addr[5] = {0xE7, 0xE7, 0xE7, 0xE7, 0xE7};
 	struct regmap *regmap;
 	uint8_t addr[5] = {0, };
@@ -475,7 +481,7 @@ static int nrf24l01p_probe(struct spi_device *spi)
 	}
 	if (memcmp(addr, known_addr, 5)) {
 		dev_err(&spi->dev, "NRF24L01p not detected\n");
-		//return ret;
+		return ret;
 	}
 
 	nrf24l01p = kzalloc(sizeof(*nrf24l01p), GFP_KERNEL);

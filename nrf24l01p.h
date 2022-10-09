@@ -10,7 +10,7 @@
 #include <linux/bits.h>
 #include <linux/regmap.h>
 
-#define NRF24_CLASS_NAME	"radio"
+#define NRF24_CLASS_NAME	"transceiver"
 #define FIFO_SIZE		65536
 
 /* Register Map */
