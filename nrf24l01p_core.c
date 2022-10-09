@@ -260,18 +260,23 @@ static void nrf24_rx_work_handler(struct work_struct *work)
 	nrf24l01p = container_of(work, struct nrf24l0_data, rx_work);
 	pipe0 = nrf24l01p->pipe0;
 
+	//Check for data in device FIFO
 	while(!nrf24l01p_is_rx_fifo_empty(nrf24l01p))
 	{
 		memset(payload, 0, NRF24L0P_PLOAD_MAX);
+		//Read the data from FIFO
 		length = nrf24l01_get_rx_payload(nrf24l01p, payload);
 		if (length < 0) {
 			dev_info(&nrf24l01p->dev, "payload invalid\n");
 		}
 		nrf24l01p->rx_active = false;
+		//Mutex to protect FIFO
 		if (mutex_lock_interruptible(&pipe0->rx_fifo_mutex))
 			return;
+		//Put the data into Kernel FIFO
 		kfifo_in(&pipe0->rx_fifo, payload, length);
 		mutex_unlock(&pipe0->rx_fifo_mutex);
+		//Wake up read file operation
 		wake_up_interruptible(&pipe0->read_wait_queue);
 	}
 }
