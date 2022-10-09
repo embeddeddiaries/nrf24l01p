@@ -113,17 +113,21 @@ static ssize_t nrf24l01p_read(struct file *filp,
 	pipe0 = filp->private_data;
 	nrf24l01p = to_nrf24_device(pipe0->dev->parent);
 
+	//Check for data in Rx kernel FIFO
 	if (kfifo_is_empty(&pipe0->rx_fifo)) {
 		if (filp->f_flags & O_NONBLOCK)
 			return -EAGAIN;
+		//Wait for data in Rx FIFO
 		wait_event_interruptible(pipe0->read_wait_queue,
 					 !kfifo_is_empty(&pipe0->rx_fifo));
 	}
 
+	//Mutex to protect FIFO
 	ret = mutex_lock_interruptible(&pipe0->rx_fifo_mutex);
 	if (ret)
 		return ret;
 
+	//Copy data from Rx FIFO to userspace buffer
 	n = kfifo_to_user(&pipe0->rx_fifo, buf, size, &copied);
 
 	mutex_unlock(&pipe0->rx_fifo_mutex);
@@ -147,22 +151,27 @@ static ssize_t nrf24l01p_write(struct file *filp,
 	txdata.pipe0 = pipe0;
 
 	memset(txdata.pload, 0, NRF24L0P_PLOAD_MAX);
+	//Copy data from userspace to kernel buffer
 	if (copy_from_user(txdata.pload, buf, txdata.size)) {
 		dev_err(&nrf24l01p->dev,"%s\n","Data copy error\n");
 		goto exit_lock;
 	}
 
+	//Mutex to protect kernel FIFO
 	if (mutex_lock_interruptible(&nrf24l01p->tx_fifo_mutex))
 		goto exit_lock;
 
+	//Put the data into kernel FIFO
 	if (kfifo_in(&nrf24l01p->tx_fifo, &txdata, sizeof(txdata)) != sizeof(txdata)) {
 		dev_err(&nrf24l01p->dev,"%s\n","Fifo write error\n");
 		goto exit_kfifo;
 	}
 	mutex_unlock(&nrf24l01p->tx_fifo_mutex);
+	//Wakeup the Tx thread
 	wake_up_interruptible(&nrf24l01p->tx_wait_queue);
 
 	pipe0->write_done = false;
+	//Wait for ack
 	wait_event_interruptible(pipe0->write_wait_queue, pipe0->write_done);
 
 	return size;
@@ -170,7 +179,6 @@ exit_kfifo:
 	mutex_unlock(&nrf24l01p->tx_fifo_mutex);
 
 exit_lock:
-	//if (filp->f_flags & O_NONBLOCK)
 	wake_up_interruptible(&nrf24l01p->tx_wait_queue);
 	return size;
 }
